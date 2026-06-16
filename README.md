@@ -111,8 +111,8 @@ Another tradeoff is that the search scoring is lightweight keyword overlap, not 
 
 I used Codex as a coding assistant during implementation.
 
-1. I used Codex to implement `tools.py` from my `planning.md` tool specs, then tested each function manually and with `pytest`.
-2. I used Codex to implement `agent.py` using my Planning Loop, State Management, and Architecture sections, then verified the success and failure branches.
+1. I used Codex to review my `tools.py` from my `planning.md` tool specs, then tested each function manually and with `pytest`.
+2. I used Codex to review my `agent.py` using my Planning Loop, State Management, and Architecture sections, then verified the success and failure branches.
 
 I still checked the code and behavior myself after each step, especially the early-stop logic and the session state fields.
 
