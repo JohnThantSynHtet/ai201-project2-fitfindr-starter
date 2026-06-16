@@ -7,34 +7,52 @@ can be called and tested independently before being wired into the agent loop.
 Complete and test each tool before moving to agent.py.
 
 Tools:
-    search_listings(description, size, max_price)  → list[dict]
-    suggest_outfit(new_item, wardrobe)              → str
-    create_fit_card(outfit, new_item)               → str
+    search_listings(description, size, max_price) -> list[dict]
+    suggest_outfit(new_item, wardrobe) -> str
+    create_fit_card(outfit, new_item) -> str
 """
 
-import os
+import re
 
-from dotenv import load_dotenv
-from groq import Groq
+import requests
 
 from utils.data_loader import load_listings
 
-load_dotenv()
+OLLAMA_MODEL = "llama3.2"
 
 
-# ── Groq client ───────────────────────────────────────────────────────────────
+def _call_ollama(prompt: str, temperature: float = 0.7) -> str:
+    """Call the local Ollama API and return the generated text."""
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
 
-def _get_groq_client():
-    """Initialize and return a Groq client using GROQ_API_KEY from .env."""
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "GROQ_API_KEY not set. Add it to a .env file in the project root."
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json=payload,
+            timeout=30,
         )
-    return Groq(api_key=api_key)
+        response.raise_for_status()
+        data = response.json()
+    except requests.RequestException as exc:
+        return f"Could not reach local Ollama: {exc}"
+    except ValueError:
+        return "Ollama returned an invalid response."
+
+    text = data.get("response", "").strip()
+    if not text:
+        return "Ollama returned an empty response."
+    return text
 
 
-# ── Tool 1: search_listings ───────────────────────────────────────────────────
+def _tokenize(text: str) -> list[str]:
+    """Split text into lowercase word tokens."""
+    return re.findall(r"\w+", text.lower())
+
 
 def search_listings(
     description: str,
@@ -54,57 +72,107 @@ def search_listings(
 
     Returns:
         A list of matching listing dicts, sorted by relevance (best match first).
-        Returns an empty list if nothing matches — does NOT raise an exception.
-
-    Each listing dict has the following fields:
-        id, title, description, category, style_tags (list), size,
-        condition, price (float), colors (list), brand, platform
-
-    TODO:
-        1. Load all listings with load_listings().
-        2. Filter by max_price and size (if provided).
-        3. Score each remaining listing by keyword overlap with `description`.
-        4. Drop any listings with a score of 0 (no relevant matches).
-        5. Sort by score, highest first, and return the listing dicts.
-
-    Before writing code, fill in the Tool 1 section of planning.md.
+        Returns an empty list if nothing matches - does NOT raise an exception.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+    keywords = _tokenize(description)
+    requested_size = size.lower() if size else None
+    scored_results: list[tuple[int, dict]] = []
 
+    for listing in listings:
+        if max_price is not None and listing.get("price", 0) > max_price:
+            continue
 
-# ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
+        if requested_size is not None:
+            size_tokens = _tokenize(str(listing.get("size", "")))
+            if requested_size not in size_tokens:
+                continue
+
+        searchable_text = " ".join(
+            [
+                str(listing.get("title", "")),
+                str(listing.get("description", "")),
+                str(listing.get("category", "")),
+                " ".join(listing.get("style_tags", [])),
+            ]
+        ).lower()
+
+        score = sum(1 for keyword in keywords if keyword in searchable_text)
+        if score > 0:
+            scored_results.append((score, listing))
+
+    scored_results.sort(key=lambda item: item[0], reverse=True)
+    return [listing for score, listing in scored_results]
+
 
 def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     """
-    Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
+    Given a thrifted item and the user's wardrobe, suggest 1-2 complete outfits.
 
     Args:
         new_item: A listing dict (the item the user is considering buying).
         wardrobe: A wardrobe dict with an 'items' key containing a list of
-                  wardrobe item dicts. May be empty — handle this gracefully.
+                  wardrobe item dicts. May be empty - handle this gracefully.
 
     Returns:
         A non-empty string with outfit suggestions.
         If the wardrobe is empty, offer general styling advice for the item
         rather than raising an exception or returning an empty string.
-
-    TODO:
-        1. Check whether wardrobe['items'] is empty.
-        2. If empty: call the LLM with a prompt for general styling ideas
-           (what kinds of items pair well, what vibe it suits, etc.).
-        3. If not empty: format the wardrobe items into a prompt and ask
-           the LLM to suggest specific outfit combinations using the new item
-           and named pieces from the wardrobe.
-        4. Return the LLM's response as a string.
-
-    Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not isinstance(new_item, dict) or not new_item.get("title"):
+        return "Invalid item: please provide a valid listing dictionary."
 
+    wardrobe_items = wardrobe.get("items", []) if isinstance(wardrobe, dict) else []
+    item_summary = "\n".join(
+        [
+            f"Title: {new_item.get('title', 'Unknown item')}",
+            f"Category: {new_item.get('category', 'Unknown category')}",
+            f"Description: {new_item.get('description', 'No description provided.')}",
+            f"Colors: {', '.join(new_item.get('colors', [])) or 'Unknown'}",
+            f"Style tags: {', '.join(new_item.get('style_tags', [])) or 'None'}",
+        ]
+    )
 
-# ── Tool 3: create_fit_card ───────────────────────────────────────────────────
+    if not wardrobe_items:
+        prompt = f"""
+You are a helpful styling assistant for a student fashion app.
+
+No wardrobe items were provided.
+
+New item:
+{item_summary}
+
+Give concise styling advice in 4 to 6 sentences. Suggest common pairings,
+colors that work well, shoe ideas, and the overall vibe this piece fits.
+Keep the response practical and easy to understand.
+""".strip()
+    else:
+        wardrobe_lines = []
+        for item in wardrobe_items:
+            name = item.get("name", "Unnamed item")
+            category = item.get("category", "unknown category")
+            colors = ", ".join(item.get("colors", [])) or "unknown colors"
+            wardrobe_lines.append(f"- {name} ({category}; colors: {colors})")
+
+        prompt = f"""
+You are a helpful styling assistant for a student fashion app.
+
+New item:
+{item_summary}
+
+Wardrobe items:
+{chr(10).join(wardrobe_lines)}
+
+Suggest 1 to 2 complete outfits in about 4 to 6 sentences total. Use the new
+item and mention specific wardrobe pieces by name. Include shoes or accessories
+when they help, and keep the response concise and useful.
+""".strip()
+
+    result = _call_ollama(prompt, temperature=0.7).strip()
+    if not result:
+        return "I couldn't generate an outfit suggestion right now."
+    return result
+
 
 def create_fit_card(outfit: str, new_item: dict) -> str:
     """
@@ -115,23 +183,36 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         new_item: The listing dict for the thrifted item.
 
     Returns:
-        A 2–4 sentence string usable as an Instagram/TikTok caption.
+        A 2-4 sentence string usable as an Instagram/TikTok caption.
         If outfit is empty or missing, return a descriptive error message
-        string — do NOT raise an exception.
-
-    The caption should:
-    - Feel casual and authentic (like a real OOTD post, not a product description)
-    - Mention the item name, price, and platform naturally (once each)
-    - Capture the outfit vibe in specific terms
-    - Sound different each time for different inputs (use higher LLM temperature)
-
-    TODO:
-        1. Guard against an empty or whitespace-only outfit string.
-        2. Build a prompt that gives the LLM the item details and the outfit,
-           and asks for a caption matching the style guidelines above.
-        3. Call the LLM and return the response.
-
-    Before writing code, fill in the Tool 3 section of planning.md.
+        string - do NOT raise an exception.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return (
+            "I couldn't create a fit card because there was no outfit "
+            "suggestion to summarize."
+        )
+
+    item_title = new_item.get("title", "this thrifted piece") if isinstance(new_item, dict) else "this thrifted piece"
+    item_price = new_item.get("price", "unknown price") if isinstance(new_item, dict) else "unknown price"
+    item_platform = new_item.get("platform", "unknown platform") if isinstance(new_item, dict) else "unknown platform"
+
+    prompt = f"""
+You are writing a casual outfit post caption for a student fashion app.
+
+Item title: {item_title}
+Price: {item_price}
+Platform: {item_platform}
+
+Outfit idea:
+{outfit}
+
+Write a short caption in 2 to 4 sentences. Mention the item title, price, and
+platform naturally once each. Keep it casual, authentic, and specific, like a
+real outfit post instead of a product listing.
+""".strip()
+
+    result = _call_ollama(prompt, temperature=0.9).strip()
+    if not result:
+        return "I couldn't create a fit card right now."
+    return result
